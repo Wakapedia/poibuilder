@@ -160,12 +160,18 @@ func _enter_tree():
 	gizmo_plugin.element_editor.element_drag_updated.connect(_on_drag_updated)
 	gizmo_plugin.element_editor.drag_topology_committed.connect(_on_drag_topology_committed)
 
-	# Register custom type
+	# Register custom type. `load()`, not `preload()`: a fresh install can
+	# enable the plugin before the first import has produced loaders for the
+	# SVG, and preload is resolved at parse time — it would fail this whole
+	# plugin script (observed on Godot 4.7.2 and 4.8-beta2).
+	var mesh_icon: Texture2D = null
+	if ResourceLoader.exists("res://addons/poibuilder/icons/pb_mesh_icon.svg"):
+		mesh_icon = load("res://addons/poibuilder/icons/pb_mesh_icon.svg")
 	add_custom_type(
 		"PBMesh",
 		"MeshInstance3D",
-		preload("res://addons/poibuilder/core/pb_mesh.gd"),
-		preload("res://addons/poibuilder/icons/pb_mesh_icon.svg") if FileAccess.file_exists("res://addons/poibuilder/icons/pb_mesh_icon.svg") else null
+		load("res://addons/poibuilder/core/pb_mesh.gd"),
+		mesh_icon
 	)
 
 	# Register the node gizmo plugin — this is the native editor integration:
