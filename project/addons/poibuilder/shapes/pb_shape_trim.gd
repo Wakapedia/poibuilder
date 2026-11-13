@@ -158,7 +158,8 @@ static func get_profile_smooth_segments(profile: ProfileType, segments: int = 4,
 ## - `closed`: Whether the path forms a closed loop.
 static func extrude_profile_along_path(profile_pts: PackedVector2Array, path: PackedVector3Array,
 		up: Vector3 = Vector3.UP, closed: bool = false, close_profile: bool = true,
-		smooth_profile_segments: PackedInt32Array = PackedInt32Array()) -> PBMeshData:
+		smooth_profile_segments: PackedInt32Array = PackedInt32Array(),
+		caps: bool = true) -> PBMeshData:
 	if profile_pts.size() < 2 or path.size() < 2:
 		return null
 	# A closed path wraps on its own (the last node connects back to the
@@ -300,8 +301,9 @@ static func extrude_profile_along_path(profile_pts: PackedVector2Array, path: Pa
 			faces.append(face)
 			vertex_counter += 4
 
-	# End caps for open paths
-	if not closed and n_pts >= 2:
+	# End caps for open paths (a closed profile needs at least a triangle, or
+	# a flat ribbon would emit an empty face)
+	if caps and not closed and n_pts >= 2 and n_prof >= 3:
 		# Start cap (reverse order for outward normal)
 		var ring_start: PackedVector3Array = rings[0]
 		var cap_indices := PackedInt32Array()

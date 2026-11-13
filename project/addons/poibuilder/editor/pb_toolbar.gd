@@ -41,6 +41,8 @@ signal operation_requested(op_name: String)
 ## Emitted when the user asks to re-edit the selected mesh's shape params.
 signal edit_params_requested
 signal trim_walls_requested
+## Emitted when the user asks to sweep a profile along the selected Path3D.
+signal sweep_requested
 
 ## Emitted when the user toggles the overlay panel pin.
 signal overlay_toggled(pinned: bool)
@@ -125,6 +127,7 @@ var _btn_new_shape: MenuButton
 var _btn_ngon: Button
 var _btn_edit_params: Button
 var _btn_trim_walls: Button
+var _btn_sweep: Button
 var _sep_row4_tools: Control
 var _btn_overlay: Button
 var _btn_recover_overlay: Button
@@ -415,6 +418,16 @@ func _build_ui() -> void:
 	_btn_trim_walls.tooltip_text = "Trim Walls: click wall faces to sweep mitred trim along them (teal hover, amber chosen; Enter / double-click applies, Esc cancels)"
 	_btn_trim_walls.pressed.connect(func(): trim_walls_requested.emit())
 
+	_btn_sweep = Button.new()
+	_btn_sweep.name = "SweepPath"
+	_btn_sweep.icon = _load_icon("icon_sweep.svg")
+	if _btn_sweep.icon == null:
+		_btn_sweep.text = "Sweep"
+	_btn_sweep.flat = true
+	_btn_sweep.focus_mode = Control.FOCUS_NONE
+	_btn_sweep.tooltip_text = "Sweep: sweep a road / barrier / pipe / ribbon profile along the selected Path3D's curve (optional drop-to-surface)"
+	_btn_sweep.pressed.connect(func(): sweep_requested.emit())
+
 	# Overlay panel group
 	_sep_overlay = _make_sep()
 	_btn_overlay = Button.new()
@@ -624,7 +637,7 @@ func _update_row_layout() -> void:
 			_op_buttons["csg_union"], _op_buttons["csg_subtract"], _op_buttons["csg_intersect"]
 		]
 		var grp_row4_tools: Array[Control] = [
-			_sep_row4_tools, _btn_trim_walls
+			_sep_row4_tools, _btn_trim_walls, _btn_sweep
 		]
 		for c in grp_row4_snap: _row4.add_child(c)
 		for c in grp_row4_obj: _row4.add_child(c)

@@ -53,6 +53,7 @@ var _uv_bottom_button: Button = null
 var material_drop_overlay: PBMaterialDropOverlay = null
 var paint_controller: PBPaintController = PBPaintController.new()
 var _export_dialog: PBExportDialog = null
+var _sweep_dialog: PBSweepDialog = null
 var _cursor_extents_label: Label = null
 ## Top-center hint banner over the 3D scene (paint / stamp / sprite / shape
 ## modes and their exit route). Pure readout, never consumes input.
@@ -187,6 +188,7 @@ func _enter_tree():
 	toolbar.operation_requested.connect(_on_operation_requested)
 	toolbar.edit_params_requested.connect(_on_edit_params_requested)
 	toolbar.trim_walls_requested.connect(_on_trim_walls_requested)
+	toolbar.sweep_requested.connect(_on_sweep_requested)
 	toolbar.overlay_toggled.connect(_on_overlay_toggled)
 	toolbar.reset_panel_requested.connect(_on_reset_panel_requested)
 	toolbar.grid_panel_toggled.connect(_on_grid_panel_toggled)
@@ -227,6 +229,12 @@ func _enter_tree():
 		var base := EditorInterface.get_base_control()
 		if base != null:
 			base.add_child(_export_dialog)
+	_sweep_dialog = PBSweepDialog.new()
+	_sweep_dialog.confirmed.connect(_on_sweep_confirmed)
+	if Engine.is_editor_hint():
+		var sweep_base := EditorInterface.get_base_control()
+		if sweep_base != null:
+			sweep_base.add_child(_sweep_dialog)
 	toolbar.sync_grid(grid)
 	# Tool overlay panel floating in the 3D viewport (readouts + params
 	# modal; logging goes to the Godot console via PBLogger).
@@ -392,6 +400,12 @@ func _exit_tree():
 			_export_dialog.get_parent().remove_child(_export_dialog)
 			_export_dialog.queue_free()
 		_export_dialog = null
+	if _sweep_dialog != null:
+		if is_instance_valid(_sweep_dialog):
+			if _sweep_dialog.get_parent() != null:
+				_sweep_dialog.get_parent().remove_child(_sweep_dialog)
+			_sweep_dialog.queue_free()
+		_sweep_dialog = null
 
 
 	if material_drop_overlay != null:
@@ -758,6 +772,8 @@ func _handle_grid_action_key(key_event: InputEventKey) -> int:
 		grid.reset_origin()
 	elif action == &"tool_sprite":
 		_enter_sprite_mode()
+	elif action == &"tool_sweep":
+		_on_sweep_requested()
 	elif action == &"obj_toggle_lit":
 		if _selected_state_nodes().is_empty():
 			return AFTER_GUI_INPUT_PASS
@@ -3796,6 +3812,107 @@ func _on_emitter_placed(node: GPUParticles3D) -> void:
 # ==============================================================================
 # Trim Walls — click walls, live preview, one committed object
 # ==============================================================================
+
+## Opens the Sweep dialog for the selected Path3D. The sweep is a one-shot
+## conversion: the Path3D stays as the editable source of the route, and the
+## generated PBMesh becomes a normal editable object.
+func _on_sweep_requested() -> void:
+	if _sweep_dialog == null or not is_instance_valid(_sweep_dialog):
+		return
+	var path := _selected_path3d()
+	if path == null:
+		_set_creation_hint("Sweep: select a Path3D node first — add one, draw its curve, then press Sweep")
+		if logger:
+			logger.warn("plugin", "Sweep: no Path3D selected")
+		return
+	_sweep_dialog.popup_centered()
+
+## The Path3D in the editor selection (first one when several are selected).
+func _selected_path3d() -> Path3D:
+	var selection := get_editor_interface().get_selection()
+	if selection == null:
+		return null
+	for node in selection.get_selected_nodes():
+		if node is Path3D:
+			return node as Path3D
+	return null
+
+func _on_sweep_confirmed() -> void:
+	if _sweep_dialog == null or not is_instance_valid(_sweep_dialog):
+		return
+	var spec: Dictionary = _sweep_dialog.get_spec()
+	var path := _selected_path3d()
+	if path == null or path.curve == null:
+		_set_creation_hint("Sweep: select the Path3D to sweep (its Curve3D must have at least two points)")
+		return
+	var closed: bool = bool(spec.get("closed", false))
+	var spacing: float = maxf(0.05, float(spec.get("spacing", 1.0)))
+	var points := PBSweep.sample_path_node(path, spacing, closed)
+	if points.size() < 2:
+		_set_creation_hint("Sweep: the selected Path3D has no usable curve (add points to it first)")
+		return
+	if bool(spec.get("drop_to_surface", false)):
+		points = _drop_points_to_surface(points)
+	var data := PBSweep.build(points, int(spec.get("kind", 0)), spec, closed)
+	if data == null or data.faces.is_empty():
+		_set_creation_hint("Sweep: the current settings produced no geometry")
+		return
+	_create_swept_node(data, path)
+
+## Projects every path sample down onto the scene collision (Terrain3D,
+## floors, blockout). Misses keep their authored position; a small Y offset
+## keeps the swept mesh from z-fighting the surface it lies on.
+func _drop_points_to_surface(points: PackedVector3Array) -> PackedVector3Array:
+	var viewport := get_editor_interface().get_editor_viewport_3d()
+	if viewport == null:
+		return points
+	var world: World3D = viewport.world_3d
+	if world == null:
+		return points
+	var space := world.direct_space_state
+	if space == null:
+		return points
+	var out := PackedVector3Array()
+	for p in points:
+		var query := PhysicsRayQueryParameters3D.create(
+				p + Vector3.UP * 500.0, p - Vector3.UP * 500.0)
+		query.collide_with_areas = false
+		var hit := space.intersect_ray(query)
+		if hit.is_empty():
+			out.append(p)
+		else:
+			out.append((hit["position"] as Vector3) + Vector3.UP * 0.01)
+	return out
+
+## Creates the swept PBMesh as ONE undoable object and selects it.
+func _create_swept_node(data: PBMeshData, source: Path3D) -> void:
+	var scene_root := get_editor_interface().get_edited_scene_root()
+	if scene_root == null:
+		return
+	var node := PBMesh.new()
+	node.name = _unique_shape_name(scene_root, &"sweep")
+	node.transform = Transform3D.IDENTITY
+	node.pb_mesh_data = data
+	node.rebuild()
+	node._update_collider()
+	var undo := get_undo_redo()
+	if undo != null:
+		undo.create_action("Sweep Path", UndoRedo.MERGE_DISABLE, scene_root)
+		undo.add_do_method(self, "_attach_detached", node, scene_root)
+		undo.add_do_method(self, "_own_node", node)
+		undo.add_do_reference(node)
+		undo.add_undo_method(self, "_detach_node", node)
+		undo.commit_action()
+	else:
+		_attach_detached(node, scene_root)
+	var selection := get_editor_interface().get_selection()
+	if selection != null:
+		selection.clear()
+		selection.add_node(node)
+	editor.active_mesh = node
+	_set_creation_hint("Sweep: built %s (%d faces) from %s" % [node.name, data.face_count(), source.name])
+	if logger:
+		logger.info("plugin", "Sweep built %d faces from %s" % [data.face_count(), source.name])
 
 ## Arms the Trim Walls session: the trim's parameters appear in the adjust
 ## panel STRAIGHT AWAY (Placement, profile, sizes are chosen while picking
