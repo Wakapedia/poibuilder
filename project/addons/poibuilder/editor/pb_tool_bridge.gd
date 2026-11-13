@@ -66,8 +66,11 @@ var _n3d: Node = null
 
 ## The engine's local-coords toggle, kept separately: it is optional (the
 ## orientation space degrades to a logged warning without it) and is
-## deliberately DISABLED while editing — programmatic set_pressed still works
-## on a disabled button, while the user's T key/mouse cannot touch it.
+## deliberately DISABLED while editing — a programmatic set_pressed still
+## changes the state on a disabled button, while the user's T key/mouse cannot
+## touch it. The `toggled` SIGNAL is another matter: Godot 4.8 stopped
+## emitting it for an assignment on a disabled button (4.7 did), so
+## _press_local_coords re-enables the button across the assignment.
 var _local_coords_btn: BaseButton = null
 
 ## Local-coords toggle state to restore when editing ends.
@@ -101,6 +104,11 @@ var _engine_grid_hidden_by_us: bool = false
 ## True while apply_orientation_space is pressing the toggle; lets the
 ## `toggled` listener ignore our own programmatic flips.
 var _applying_space: bool = false
+
+## Set by the `toggled` listener; lets _press_local_coords tell whether the
+## engine saw its press (it must not, on Godot 4.8, while the toggle is
+## disabled) and deliver the signal itself when it did not.
+var _press_signal_seen: bool = false
 
 # ==============================================================================
 # Setup / teardown
@@ -286,11 +294,11 @@ func set_editing_active(active: bool) -> void:
 			_use_snap_before_editing = _use_snap_btn.button_pressed
 			_use_snap_btn.disabled = true
 			if _use_snap_btn.button_pressed:
-				_use_snap_btn.button_pressed = false
+				_assign_pressed(_use_snap_btn, false)
 		else:
 			_use_snap_btn.disabled = false
 			if _use_snap_btn.button_pressed != _use_snap_before_editing:
-				_use_snap_btn.button_pressed = _use_snap_before_editing
+				_assign_pressed(_use_snap_btn, _use_snap_before_editing)
 
 ## Whether the engine's local-coords toggle must be ON for `space`
 ## (a PBEditor.OrientationSpace value).
@@ -316,7 +324,8 @@ static func local_coords_for_space(space: int) -> bool:
 ## Skips redundant flips (a toggle press always costs the engine a gizmo
 ## rebuild). Intentionally does NOT bail when the button is disabled: while
 ## editing we disable the toggle to pin out the user's T key, and a disabled
-## button still accepts programmatic set_pressed (unlike user input).
+## button still accepts programmatic set_pressed (unlike user input) — see
+## _press_local_coords for the signal side of that.
 func apply_orientation_space(space: int) -> bool:
 	if _local_coords_btn == null or not is_instance_valid(_local_coords_btn):
 		return false
@@ -334,14 +343,33 @@ func _press_local_coords(pressed: bool) -> void:
 	if _local_coords_btn.button_pressed == pressed:
 		return
 	_applying_space = true
-	_local_coords_btn.button_pressed = pressed
+	_press_signal_seen = false
+	_assign_pressed(_local_coords_btn, pressed)
+	# Belt and braces: if an engine suppresses `toggled` even when enabled,
+	# deliver the notification ourselves.
+	if not _press_signal_seen:
+		_local_coords_btn.toggled.emit(pressed)
 	_applying_space = false
+
+## Assigns button_pressed so the engine's `toggled` handler sees it even on
+## Godot 4.8+, which suppresses the signal while the button is disabled. The
+## disabled state is restored and no input is processed inside the call.
+func _assign_pressed(btn: BaseButton, pressed: bool) -> void:
+	if btn == null or not is_instance_valid(btn):
+		return
+	var was_disabled: bool = btn.disabled
+	if was_disabled:
+		btn.disabled = false
+	btn.button_pressed = pressed
+	if was_disabled:
+		btn.disabled = true
 
 ## The toggle flipped without us doing it (View menu, a leftover drag restore,
 ## an engine version that re-enables the disabled button) while editing —
 ## re-assert the plugin's space so the engine state and the overlay readout
 ## never diverge. Outside editing the toggle is stock editor UI: leave it be.
 func _on_local_coords_toggled(_pressed: bool) -> void:
+	_press_signal_seen = true
 	if _applying_space or not editing_active:
 		return
 	if logger != null:
@@ -550,12 +578,12 @@ func apply_engine_snap(step: float, rotate_deg: float, snap_on: bool) -> void:
 	_confirm_snap_spinners()
 	if _use_snap_btn != null and is_instance_valid(_use_snap_btn) \
 			and _use_snap_btn.button_pressed != snap_on:
-		_use_snap_btn.button_pressed = snap_on
+		_assign_pressed(_use_snap_btn, snap_on)
 	# Keep PoiBuilder's element-mode semantics unchanged: while editing,
 	# engine snap stays forced off (our layer owns element drags).
 	if editing_active and _use_snap_btn != null and is_instance_valid(_use_snap_btn):
 		if _use_snap_btn.button_pressed:
-			_use_snap_btn.button_pressed = false
+			_assign_pressed(_use_snap_btn, false)
 
 ## Restores the engine snap values captured before the first apply.
 func restore_engine_snap() -> void:
@@ -566,5 +594,5 @@ func restore_engine_snap() -> void:
 	_snap_spins["scale"].set_value_no_signal(_engine_snap_backup.get("scale", 10.0))
 	_confirm_snap_spinners()
 	if _use_snap_btn != null and is_instance_valid(_use_snap_btn):
-		_use_snap_btn.button_pressed = _engine_snap_backup.get("use_snap", false)
+		_assign_pressed(_use_snap_btn, _engine_snap_backup.get("use_snap", false))
 	_engine_snap_applied = false

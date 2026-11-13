@@ -135,10 +135,32 @@ func test_external_flip_while_editing_is_reverted():
 	assert_true(_local_btn().button_pressed)
 
 	# A path that bypassed the disabled button flipped it OFF — the listener
-	# must re-assert the plugin's space.
-	_local_btn().button_pressed = false
+	# must re-assert the plugin's space. Godot 4.8 stopped emitting `toggled`
+	# for a direct assignment on a disabled button, so the simulated bypass
+	# sets the state silently and then delivers the notification such a path
+	# would have delivered to the engine.
+	_local_btn().set_pressed_no_signal(false)
+	_local_btn().toggled.emit(false)
 	assert_true(_local_btn().button_pressed,
 		"External OFF flip while editing snaps back to the plugin's space")
+
+func test_disabled_toggle_press_notifies_the_engine():
+	# Godot 4.8 does not emit `toggled` when button_pressed is assigned on a
+	# disabled BaseButton. The engine rebuilds the gizmo basis from that signal,
+	# so the plugin's own press must still reach it while editing (toggle
+	# disabled) even though the user's T key must not.
+	var bridge := _make_bridge_with_local()
+	bridge.setup(_root)
+	bridge.set_editing_active(true)
+	assert_true(_local_btn().disabled, "Editing disables the engine toggle")
+
+	var seen: Array = []
+	_local_btn().toggled.connect(func(on: bool) -> void: seen.append(on))
+	assert_true(bridge.apply_orientation_space(PBEditor.OrientationSpace.ELEMENT))
+	assert_true(_local_btn().button_pressed, "ELEMENT presses the toggle ON")
+	assert_eq(seen, [true],
+		"The engine's toggled handler must see the press even while the toggle is disabled")
+	assert_true(_local_btn().disabled, "The toggle stays disabled for the rest of the edit")
 
 func test_external_flip_outside_editing_is_kept():
 	var bridge := _make_bridge_with_local()
