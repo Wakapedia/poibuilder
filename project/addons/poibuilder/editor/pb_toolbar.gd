@@ -43,6 +43,8 @@ signal edit_params_requested
 signal trim_walls_requested
 ## Emitted when the user asks to sweep a profile along the selected Path3D.
 signal sweep_requested
+## Emitted when the user asks to repeat a mesh along the selected Path3D.
+signal array_requested
 
 ## Emitted when the user toggles the overlay panel pin.
 signal overlay_toggled(pinned: bool)
@@ -128,6 +130,7 @@ var _btn_ngon: Button
 var _btn_edit_params: Button
 var _btn_trim_walls: Button
 var _btn_sweep: Button
+var _btn_array: Button
 var _sep_row4_tools: Control
 var _btn_overlay: Button
 var _btn_recover_overlay: Button
@@ -428,6 +431,16 @@ func _build_ui() -> void:
 	_btn_sweep.tooltip_text = "Sweep: sweep a road / barrier / pipe / ribbon profile along the selected Path3D's curve (optional drop-to-surface)"
 	_btn_sweep.pressed.connect(func(): sweep_requested.emit())
 
+	_btn_array = Button.new()
+	_btn_array.name = "ArrayAlongPath"
+	_btn_array.icon = _load_icon("icon_array.svg")
+	if _btn_array.icon == null:
+		_btn_array.text = "Array"
+	_btn_array.flat = true
+	_btn_array.focus_mode = Control.FOCUS_NONE
+	_btn_array.tooltip_text = "Array: repeat the selected mesh along the selected Path3D (fence pickets/posts, guard rails, bollards; optional terrain snap and colliders)"
+	_btn_array.pressed.connect(func(): array_requested.emit())
+
 	# Overlay panel group
 	_sep_overlay = _make_sep()
 	_btn_overlay = Button.new()
@@ -637,7 +650,7 @@ func _update_row_layout() -> void:
 			_op_buttons["csg_union"], _op_buttons["csg_subtract"], _op_buttons["csg_intersect"]
 		]
 		var grp_row4_tools: Array[Control] = [
-			_sep_row4_tools, _btn_trim_walls, _btn_sweep
+			_sep_row4_tools, _btn_trim_walls, _btn_sweep, _btn_array
 		]
 		for c in grp_row4_snap: _row4.add_child(c)
 		for c in grp_row4_obj: _row4.add_child(c)

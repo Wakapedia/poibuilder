@@ -54,6 +54,7 @@ var material_drop_overlay: PBMaterialDropOverlay = null
 var paint_controller: PBPaintController = PBPaintController.new()
 var _export_dialog: PBExportDialog = null
 var _sweep_dialog: PBSweepDialog = null
+var _array_dialog: PBArrayDialog = null
 var _cursor_extents_label: Label = null
 ## Top-center hint banner over the 3D scene (paint / stamp / sprite / shape
 ## modes and their exit route). Pure readout, never consumes input.
@@ -189,6 +190,7 @@ func _enter_tree():
 	toolbar.edit_params_requested.connect(_on_edit_params_requested)
 	toolbar.trim_walls_requested.connect(_on_trim_walls_requested)
 	toolbar.sweep_requested.connect(_on_sweep_requested)
+	toolbar.array_requested.connect(_on_array_requested)
 	toolbar.overlay_toggled.connect(_on_overlay_toggled)
 	toolbar.reset_panel_requested.connect(_on_reset_panel_requested)
 	toolbar.grid_panel_toggled.connect(_on_grid_panel_toggled)
@@ -235,6 +237,12 @@ func _enter_tree():
 		var sweep_base := EditorInterface.get_base_control()
 		if sweep_base != null:
 			sweep_base.add_child(_sweep_dialog)
+	_array_dialog = PBArrayDialog.new()
+	_array_dialog.confirmed.connect(_on_array_confirmed)
+	if Engine.is_editor_hint():
+		var array_base := EditorInterface.get_base_control()
+		if array_base != null:
+			array_base.add_child(_array_dialog)
 	toolbar.sync_grid(grid)
 	# Tool overlay panel floating in the 3D viewport (readouts + params
 	# modal; logging goes to the Godot console via PBLogger).
@@ -406,6 +414,12 @@ func _exit_tree():
 				_sweep_dialog.get_parent().remove_child(_sweep_dialog)
 			_sweep_dialog.queue_free()
 		_sweep_dialog = null
+	if _array_dialog != null:
+		if is_instance_valid(_array_dialog):
+			if _array_dialog.get_parent() != null:
+				_array_dialog.get_parent().remove_child(_array_dialog)
+			_array_dialog.queue_free()
+		_array_dialog = null
 
 
 	if material_drop_overlay != null:
@@ -774,6 +788,8 @@ func _handle_grid_action_key(key_event: InputEventKey) -> int:
 		_enter_sprite_mode()
 	elif action == &"tool_sweep":
 		_on_sweep_requested()
+	elif action == &"tool_path_array":
+		_on_array_requested()
 	elif action == &"obj_toggle_lit":
 		if _selected_state_nodes().is_empty():
 			return AFTER_GUI_INPUT_PASS
@@ -3913,6 +3929,174 @@ func _create_swept_node(data: PBMeshData, source: Path3D) -> void:
 	_set_creation_hint("Sweep: built %s (%d faces) from %s" % [node.name, data.face_count(), source.name])
 	if logger:
 		logger.info("plugin", "Sweep built %d faces from %s" % [data.face_count(), source.name])
+
+## Opens the Array dialog. Requires BOTH the Path3D and the mesh to repeat in
+## the editor selection — the source stays in the scene as the editable
+## prefab; the result is a container of instances.
+func _on_array_requested() -> void:
+	if _array_dialog == null or not is_instance_valid(_array_dialog):
+		return
+	var inputs := _selected_array_inputs()
+	if inputs.get("path") == null or inputs.get("source") == null:
+		_set_creation_hint("Array: select BOTH a Path3D and the mesh to repeat (Ctrl+click both)")
+		if logger:
+			logger.warn("plugin", "Array: selection needs a Path3D and a mesh")
+		return
+	_array_dialog.popup_centered()
+
+## Resolves {"path": Path3D, "source": Node, "mesh": Mesh} from the editor
+## selection. The first Path3D wins; the first mesh node that is not that path
+## wins as the source.
+func _selected_array_inputs() -> Dictionary:
+	var out := {"path": null, "source": null, "mesh": null}
+	var selection := get_editor_interface().get_selection()
+	if selection == null:
+		return out
+	for node in selection.get_selected_nodes():
+		if node is Path3D and out["path"] == null:
+			out["path"] = node
+			continue
+		if out["source"] != null:
+			continue
+		if node is PBMesh:
+			var pb := node as PBMesh
+			if pb.mesh != null:
+				out["source"] = pb
+				out["mesh"] = pb.mesh
+		elif node is MeshInstance3D:
+			var mi := node as MeshInstance3D
+			if mi.mesh != null:
+				out["source"] = mi
+				out["mesh"] = mi.mesh
+	return out
+
+func _on_array_confirmed() -> void:
+	if _array_dialog == null or not is_instance_valid(_array_dialog):
+		return
+	var spec: Dictionary = _array_dialog.get_spec()
+	var inputs := _selected_array_inputs()
+	var path: Path3D = inputs.get("path")
+	var source: Node = inputs.get("source")
+	var mesh: Mesh = inputs.get("mesh")
+	if path == null or source == null or mesh == null or path.curve == null:
+		_set_creation_hint("Array: select a Path3D and the mesh to repeat")
+		return
+	if bool(spec.get("drop_to_surface", false)) or bool(spec.get("align_to_normal", false)):
+		var probe := _array_surface_probe()
+		if probe.is_valid():
+			spec["surface"] = probe
+	var xf: Transform3D = path.global_transform if path.is_inside_tree() else path.transform
+	var transforms := PBPathArray.compute_transforms(path.curve, xf, spec)
+	if transforms.is_empty():
+		_set_creation_hint("Array: the path produced no placements (check the curve, margins and spacing)")
+		return
+	_create_array_container(transforms, source, mesh, spec, path)
+
+## Raycast probe handed to PBPathArray: returns the hit surface under a point.
+func _array_surface_probe() -> Callable:
+	var viewport := get_editor_interface().get_editor_viewport_3d()
+	if viewport == null:
+		return Callable()
+	var world: World3D = viewport.world_3d
+	if world == null:
+		return Callable()
+	var space := world.direct_space_state
+	if space == null:
+		return Callable()
+	return func(p: Vector3) -> Dictionary:
+		var query := PhysicsRayQueryParameters3D.create(
+				p + Vector3.UP * 500.0, p - Vector3.UP * 500.0)
+		query.collide_with_areas = false
+		var hit := space.intersect_ray(query)
+		if hit.is_empty():
+			return {}
+		return {"position": hit["position"], "normal": hit["normal"]}
+
+## Builds the container of copies as ONE undoable object. Copies share the
+## source mesh resource (no per-copy PBMeshData duplication), and each gets
+## the collision strategy chosen in the dialog.
+func _create_array_container(transforms: Array[Transform3D], source: Node, mesh: Mesh,
+		spec: Dictionary, path: Path3D) -> void:
+	var scene_root := get_editor_interface().get_edited_scene_root()
+	if scene_root == null:
+		return
+	var container := Node3D.new()
+	container.name = _unique_node_name(scene_root, "Array_%s" % String(source.name))
+	container.set_meta("pb_array_spec", spec.duplicate(true))
+	container.set_meta("pb_array_source", source.name)
+	container.set_meta("pb_array_path", path.name)
+	var root_xf: Transform3D = scene_root.global_transform if scene_root.is_inside_tree() else scene_root.transform
+	container.transform = root_xf.affine_inverse()
+	var collision_mode: int = int(spec.get("collision", PBPathArray.CollisionMode.BOX))
+	var copy_index := 1
+	for xf in transforms:
+		var copy := MeshInstance3D.new()
+		copy.name = "Copy_%03d" % copy_index
+		copy_index += 1
+		copy.mesh = mesh
+		copy.transform = xf
+		if source is MeshInstance3D:
+			var src_mi := source as MeshInstance3D
+			copy.material_override = src_mi.material_override
+			copy.cast_shadow = src_mi.cast_shadow
+		_array_add_collision(copy, mesh, collision_mode)
+		container.add_child(copy)
+	var undo := get_undo_redo()
+	if undo != null:
+		undo.create_action("Array Along Path", UndoRedo.MERGE_DISABLE, scene_root)
+		undo.add_do_method(self, "_attach_detached", container, scene_root)
+		undo.add_do_method(self, "_own_subtree", container)
+		undo.add_do_reference(container)
+		undo.add_undo_method(self, "_detach_node", container)
+		undo.commit_action()
+	else:
+		_attach_detached(container, scene_root)
+		_own_subtree(container)
+	var selection := get_editor_interface().get_selection()
+	if selection != null:
+		selection.clear()
+		selection.add_node(container)
+	editor.active_mesh = null
+	_set_creation_hint("Array: %d copies of %s along %s. Change the source mesh, then re-array if needed."
+		% [transforms.size(), source.name, path.name])
+	if logger:
+		logger.info("plugin", "Array built %d copies of %s" % [transforms.size(), source.name])
+
+func _array_add_collision(copy: MeshInstance3D, mesh: Mesh, mode: int) -> void:
+	if mode == PBPathArray.CollisionMode.NONE or mesh == null:
+		return
+	var body := StaticBody3D.new()
+	var shape := CollisionShape3D.new()
+	if mode == PBPathArray.CollisionMode.BOX:
+		var aabb: AABB = mesh.get_aabb()
+		var box := BoxShape3D.new()
+		box.size = Vector3(maxf(0.01, aabb.size.x), maxf(0.01, aabb.size.y), maxf(0.01, aabb.size.z))
+		shape.shape = box
+		shape.position = aabb.get_center()
+	else:
+		shape.shape = mesh.create_trimesh_shape()
+	copy.add_child(body)
+	body.add_child(shape)
+
+## Assigns an owner to `node` and every descendant so the whole new subtree
+## saves with the scene (a container's children are NOT owned automatically).
+func _own_subtree(node: Node) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	var scene_root := get_editor_interface().get_edited_scene_root()
+	if scene_root == null:
+		return
+	node.owner = scene_root
+	for child in node.get_children():
+		_own_subtree(child)
+
+func _unique_node_name(scene_root: Node, base: String) -> String:
+	var candidate := base
+	var i := 2
+	while scene_root.get_node_or_null(NodePath(candidate)) != null:
+		candidate = "%s%d" % [base, i]
+		i += 1
+	return candidate
 
 ## Arms the Trim Walls session: the trim's parameters appear in the adjust
 ## panel STRAIGHT AWAY (Placement, profile, sizes are chosen while picking
